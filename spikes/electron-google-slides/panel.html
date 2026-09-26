@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'">
+<title>Slipper spike</title>
+<style>
+body{margin:0;font:13px/1.7 -apple-system,'Hiragino Sans',sans-serif;background:#f6f5f0;color:#23282a;padding:18px;border-left:1px solid #ddd;height:100vh;box-sizing:border-box;overflow:auto}
+h1{font-size:15px;margin:0 0 4px}.muted{color:#6e716a;font-size:12px}
+dl{display:grid;grid-template-columns:88px 1fr;gap:4px 8px;margin:14px 0}dt{color:#6e716a}dd{margin:0;word-break:break-all;font-family:ui-monospace,monospace;font-size:12px}
+.ok{color:#2f7d32;font-weight:600}.ng{color:#b3261e;font-weight:600}
+button{font:inherit;padding:6px 12px;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer}
+ol{padding-left:18px}li{margin:4px 0}#log{font-family:ui-monospace,monospace;font-size:11px;color:#6e716a;white-space:pre-wrap}
+</style></head>
+<body>
+<h1>Slipper 技術検証</h1>
+<p class="muted">左は本物の Google Slides です。この右側だけが Slipper の画面です。</p>
+<dl>
+ <dt>ログイン</dt><dd id="signedIn">—</dd>
+ <dt>資料 ID</dt><dd id="presentation">—</dd>
+ <dt>ページ ID</dt><dd id="slide">—</dd>
+ <dt>識別情報</dt><dd id="ua">—</dd>
+ <dt>URL</dt><dd id="url">—</dd>
+</dl>
+<button id="probe">状態を確認</button>
+<h1 style="margin-top:22px">ログインを取り込む</h1>
+<p class="muted">アプリ内では Google にログインできないため、普段のブラウザのログイン状態（google.com の Cookie のみ）を取り込みます。macOS のキーチェーンの確認が出たら「許可」を押してください。</p>
+<div id="browsers"></div>
+<p id="importResult" class="muted"></p>
+<h1 style="margin-top:22px">試してほしいこと</h1>
+<ol>
+ <li>上のボタンで、普段のブラウザからログインを取り込む</li>
+ <li>自分の資料を開き、文字を1つ編集する</li>
+ <li>別のページをクリックし、上の「ページ ID」が変わるか見る</li>
+</ol>
+<div id="log"></div>
+<script src="panel.js"></script>
+</body></html>
