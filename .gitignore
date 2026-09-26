@@ -1,1 +1,5 @@
 node_modules/
+out/
+dist/
+last-variants.json
+artifacts/

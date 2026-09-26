@@ -1,7 +1,35 @@
 {
   "name": "slipper",
+  "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "scripts": { "dev": "node server.mjs", "start": "node server.mjs", "test": "node --test" },
-  "engines": { "node": ">=20" }
+  "description": "思いつかなかった伝え方を探して、Google Slides の資料を育てる制作支援アプリ",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "evaluate:generation": "node scripts/evaluate-generation.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.4.5",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^5.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  }
 }

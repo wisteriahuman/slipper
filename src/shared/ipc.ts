@@ -1,0 +1,55 @@
+// What the panel sees and what it may ask for. Secrets (cookies, tokens) never cross this boundary.
+import type {SlideElement, Variant} from './element';
+import type {ColorMeaning, Palette} from './palette';
+import type {Storyline} from './storyline';
+import type {DeckReading, PageReading} from './reading';
+
+// Who the presentation is for (audience) can differ from who its content is about (subject).
+export type BriefView = {audience: string; message: string; context?: string; subject?: string};
+// x/y/w/h: where the asset sits on the original page, used to crop it out of the page image.
+export type PageAssetView = {id: string; kind: string; description: string; contentUrl?: string; x: number; y: number; w: number; h: number};
+// Layout/master decorations (bands, rules) that remain on any page added from this one.
+export type DecorationView = {x: number; y: number; w: number; h: number; kind: 'rect' | 'line'; color: string};
+
+export type PanelState = {
+  location: {presentationId: string | null; pageId: string | null};
+  signedIn: boolean;
+  browsers: Array<{id: string; label: string}>;
+  google: {hasClient: boolean; connected: boolean; needsReconnect: boolean};
+  deck: {presentationId: string; title: string; brief: BriefView | null; palette: Palette} | null;
+  // textBoxes: where the original page's text sits, to hide it inside asset crops of the page image.
+  page: {pageId: string; thumbnailUrl: string | null; decorations: DecorationView[]; assets: PageAssetView[]; textBoxes: Array<{x: number; y: number; w: number; h: number}>; reading: PageReading | null} | null;
+  // How the current deck flows today; stale when pages were added, removed or reordered since.
+  deckReading: {reading: DeckReading; stale: boolean} | null;
+  pageError: string | null;
+  variants: Variant[];
+  running: {kind: 'page' | 'flow'; pending: number; startedAt: number; deep: boolean; status: string | null} | null;
+  storylines: Storyline[];
+  // Rendered page images for storyboards (data URLs), keyed by page id.
+  thumbnails: Record<string, string>;
+  notices: string[];
+  mcp: {url: string} | null;
+};
+
+// frames: the edited slides of the variant, in order (one array of elements per slide).
+export type AdoptInput = {variantId: string; frames: SlideElement[][]; aim: string; counts: {moved: number; textChanged: number; resized: number}};
+
+export type PanelApi = {
+  getState(): Promise<PanelState>;
+  onState(listener: (state: PanelState) => void): () => void;
+  importCookies(browserId: string): Promise<{ok: boolean; message: string}>;
+  chooseGoogleClient(): Promise<{ok: boolean; message: string}>;
+  connectGoogle(): Promise<{ok: boolean; message: string}>;
+  saveBrief(input: BriefView & {colors: ColorMeaning[]}): Promise<{ok: boolean; message: string}>;
+  requestVariants(input: {direction: string; deep: boolean}): Promise<{ok: boolean; message: string}>;
+  requestStorylines(input: {direction: string; deep: boolean}): Promise<{ok: boolean; message: string}>;
+  adoptStoryline(storylineId: string): Promise<{ok: boolean; message: string; newPresentationId?: string}>;
+  openPresentation(presentationId: string): Promise<void>;
+  refreshStoryboardImages(): Promise<void>;
+  rereadDeck(): Promise<{ok: boolean; message: string}>;
+  openExternal(url: string): Promise<void>;
+  cancelRequests(): Promise<void>;
+  adopt(input: AdoptInput): Promise<{ok: boolean; message: string; newPageId?: string}>;
+  showPage(pageId: string): Promise<void>;
+  dismissNotice(index: number): Promise<void>;
+};
