@@ -5,7 +5,7 @@ import {SlipperMcpServer} from '../src/main/mcp-server';
 
 it('exposes preview without a receipt and requires the receipt only at submission', async()=>{
   let previews=0;
-  const server=new SlipperMcpServer({currentPage:async()=>({}),pageImages:async()=>[],submitProposalPlan:async()=>[],submitVariantReview:async()=>[],submitVariant:async()=>[],submitStoryline:async()=>[],submitDeckReading:async()=>[],submitPageReading:async()=>[],previewVariant:async()=>{previews++;return {images:[],problems:[],previewToken:'receipt'};}});
+  const server=new SlipperMcpServer({currentPage:async()=>({}),pageImages:async()=>[],searchLibrary:async()=>[],submitProposalPlan:async()=>[],submitVariantReview:async()=>[],submitVariant:async()=>[],submitStoryline:async()=>[],submitDeckReading:async()=>[],submitPageReading:async()=>[],previewVariant:async()=>{previews++;return {images:[],problems:[],previewToken:'receipt'};}});
   await server.start();
   const client=new Client({name:'test',version:'1.0'});
   try {

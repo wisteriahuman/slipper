@@ -80,10 +80,10 @@ export function colorGuide(palette: Palette): string {
   return lines.join('\n');
 }
 
-export function buildVariantPrompt(o: {requestId: string; brief: Brief; palette: Palette; page: PageContent; decorations?: Decoration[]; flowRole?: FlowRole | null; technique: string; excluded?: string[]; direction?: string; plan?: ProposalPlan}): string {
+export function buildVariantPrompt(o: {requestId: string; brief: Brief; palette: Palette; page: PageContent; decorations?: Decoration[]; flowRole?: FlowRole | null; technique: string; excluded?: string[]; direction?: string; plan?: ProposalPlan; library?: string}): string {
   const page = {
     texts: o.page.texts.map(t => ({id: t.id, text: t.text})),
-    assets: o.page.assets.map(a => ({assetId: a.id, kind: a.kind, description: a.description, x: Math.round(a.x), y: Math.round(a.y), w: Math.round(a.w), h: Math.round(a.h)}))
+    assets: o.page.assets.map(a => ({assetId: a.id, kind: a.kind, description: a.description, x: Math.round(a.x), y: Math.round(a.y), w: Math.round(a.w), h: Math.round(a.h),source:a.source}))
   };
   return `あなたはスライドの伝え方を提案するデザイナーです。次のページを、指定の方針で別の伝え方にしたスライド案を1つ作り、Slipper の submit_variant（requestId "${o.requestId}"）で送ってください。
 まず Slipper の get_page_images（requestId "${o.requestId}"）でページの画像を見て、文字だけでは分からない図・グラフ・強調・前後のページの連続も踏まえてください。
@@ -113,13 +113,17 @@ ${WRITING_GUIDE}
 - キャンバスは ${CANVAS.width}×${CANVAS.height} px。要素はすべてこの中に収める。
 - 色違いや配置違いではなく、手法に沿って見せ方そのものを変える。
 - 素材（assets）を使うときは type "asset" と assetId で参照し、中身は変えない。x・y・w・h は元のページでの位置と大きさで、同じ値にすれば元の場所に残る。縦横比は保つ。使わない素材は入れなくてよい。
+- source がある素材は利用者が選んだ資料内の画像・グラフ・ページ全体の画像。get_page_images で実物を確認し、狙いに合う素材を活用する。source.context の文脈を守り、別の時期・対象の証拠にすり替えない。ページ全体の素材には見出しや注釈も含まれる。素材の文字を重複して作らず、中の文字が読める大きさで置く。w/h の比率を維持する。
+${o.library ? `- 共通素材: ${o.library}
+` : ''}- 構成を決めたら、提出の前に search_library（requestId "${o.requestId}"）で、各コマや各項目の意味を補う素材があるかを一度は確かめる。アイコンのタグは英語なので、英語と日本語の両方で探す。返された画像を見て、狙いに合うものだけを assetId で使い、合わなければ使わない。アイコンは項目の意味を一目で補うとき、人物イラストは聞き手や利用者の状況・気持ちを示すときに使う。飾りのためだけに置かない。背景は透明。アイコンは既定で濃い灰色の線だが、要素の color にテーマ色の名前を書くとその色になる（暗い面の上では LIGHT1 など明るい色にする。色の意味の規則は文字と同じ）。人物イラストは黒の線画で色は変えられないので、暗い面の上には置かない。人物イラストを探すときは kind "illustration" を指定する。共通素材は資料の事実の根拠にならない（人物イラストは実在の利用者ではない）。返された w/h の比率を維持する。
 - 元のページの図（グラフの線や点、図形の組み合わせ）は、描き直さずに素材として再利用する。描き直すと元の図の形（曲線の形など）が失われる。図の一部だけを見せたいときも、該当する素材だけを使う。
-- 元のページにない内容（架空の場面・例の数値・新しい言い回しの主張など）を加えた要素は invented: true にする。
+- 元のページにない内容（架空の場面・例の数値・新しい言い回しの主張など）を加えた要素は invented: true にする。ただし、この印は根拠のない事実を表示する許可ではない。図を完成させるために、元資料にない営業日・時間帯・対象範囲などを一般常識で埋めない。仮定や例が必要なら画像上にも「仮定」「例」と明示し、実際の条件は未確認と分かるようにする。主張の根拠には使わない。
 - frames にスライドを並べる。連続の手法なら2〜3枚、そうでなければ1枚にする（1枚で足りない内容なら2枚にしてもよい）。
 - 連続の規則: ${continuityGuide(o.technique)}
 - 画面を覆うときは、全面の図形（type "shape"、shape "rect"）に opacity（0.5〜0.7）を付け、その上に一言を置く。
 - technique には、使った手法の id を書く。
 - aim には、この案が聞き手に何をしようとしているかを1行で、gaveUp には、この案が諦めたことを1行で書く。
+- 判断を変える条件（測定対象・期間、未検証の範囲、承認や確定の条件、提案と実績の区別）は、案の中で読める形で残す。gaveUp に書くだけでは代わりにならない。強調を絞っても、この条件は短い注記か後続のコマで伝える。
 - 提出の前に preview_variant へ案の全体を渡す。返された画像を実際に見て、文字切れ・重なり・注目先・狙いと手法の成立・元資料の意味を確認する。主張と図から読める事実を照合し、比較だけから因果を言っていないかも確認する。
 - 問題があれば内容を直して preview_variant を再度呼ぶ。文字サイズを小さくするだけで逃げず、文を削る・枠を広げる・分けることを検討する。
 - 最後に描画した案をそのまま submit_variant に渡し、previewToken と visualReview（画像のどの箇所で狙いが成立するか、直した点を具体的に記載）を添える。変更後は必ず再描画する。
@@ -226,21 +230,23 @@ function continuityGuide(id: string): string {
 function planBlock(plan: ProposalPlan | undefined): string {
   return plan ? `\n# 先に選んだ狙いと構成\n${JSON.stringify(plan)}\naim はこの狙いを保ち、見直しで根拠より強いと分かった表現は弱めてよい。補助の手法は supportingTechniques に記録する。根拠にない事実を足して狙いを成立させない。\n` : '';
 }
-export function buildPlanPrompt(o: {requestId: string; level: 'page' | 'flow'; brief: Brief; material: unknown; used: string[]; direction?: string}): string {
+export function buildPlanPrompt(o: {requestId: string; level: 'page' | 'flow'; brief: Brief; material: unknown; used: string[]; direction?: string; library?: string}): string {
   const catalog = (o.level === 'page' ? PAGE_TECHNIQUES : FLOW_TECHNIQUES).filter(t => recipeFor(t.id).available).map(t => ({...t, recipe: recipeFor(t.id)}));
   return `あなたは伝え方を設計する編集者です。まず get_page_images（requestId "${o.requestId}"）で実物を見てください。
 ${briefBlock(o.brief)}
-材料（根拠のidを含む）: ${JSON.stringify(o.material)}
+材料（根拠のidを含む）: ${JSON.stringify(o.material, (key,value)=>key==='previewUrl' || key==='contentUrl' ? undefined:value)}
 利用者の方向: ${o.direction ?? '指定なし'}
+${o.library ? `共通素材（資料にない絵を補える。search_library で中身を確かめられる）: ${o.library}\n` : ''}
 これまで試した手法: ${JSON.stringify(o.used)}
 カタログ: ${JSON.stringify(catalog)}
 ${o.level === 'flow' ? `補助に使えるページ手法: ${JSON.stringify(PAGE_TECHNIQUES.map(t => ({id:t.id, how:t.how, recipe:recipeFor(t.id)})))}` : ''}
 submit_proposal_plan（requestId "${o.requestId}"）で、狙いの異なる3案をまとめて送ってください。
 1. この聞き手が理解・判断するために何を受け取る必要があるか、材料から考える。
 2. 説明・比較・場面への共感・意外な事実など、内容に合う異なる狙いを3つ選ぶ。固定の3分類を埋める必要はない。
-3. それぞれの狙いを実現できる手法を選ぶ。必要な数値・画像・関係が材料に存在するか確かめ、evidence にそのidを書く。写真がないなら写真が前提の案にしない。
+3. それぞれの狙いを実現できる手法を選ぶ。必要な数値・画像・関係が材料に存在するか確かめ、evidence にそのidを書く。資料にない写真・実例を前提にしない。アイコンや人物イラストは共通素材で補える（一枚一絵・場面・手順の図解などで、文字だけの案に偏らない）。ただし共通素材は事実の根拠にはならず、evidence には書かない。
 4. 同じ内容の色・配置違い、手法名だけ違う3案にしない。未使用や意外な手法も検討するが、内容との適合を優先する。補助の手法を最大2つ組み合わせてよい。
 5. aim 自体も資料の根拠に合わせる。比較結果だけから「理由が分かる」「原因を示す」と約束しない。方法の違いと効果の因果が未検証なら、違いを見せる狙いにする。reason に材料との対応、treatment に具体的な見せ方を書く。発表の形式・認知原理・表現手法を混同しない。
+6. 各案は単独で採用される。測定の条件・未検証の範囲・操作の確定条件など、欠けると聞き手の判断が変わる情報を別の案任せにせず、それぞれの treatment に残し方を含める。
 ${WRITING_GUIDE}
 エラーなら修正する。送り終えたら「完了」とだけ答えてください。`;
 }
@@ -249,15 +255,21 @@ export function buildVariantReviewPrompt(o: {requestId: string; brief: Brief; so
   return `あなたはスライド案の検証者です。作成者とは別の立場で、明確な不一致だけを確認します。
 get_page_images（requestId "${o.requestId}"）で元の画像と案の全コマを見てください。
 ${briefBlock(o.brief)}
-元の材料: ${JSON.stringify(o.source)}
+元の材料: ${JSON.stringify(o.source, (key,value)=>key==='previewUrl' || key==='contentUrl' ? undefined:value)}
 設計意図: ${JSON.stringify(o.plan ?? null)}
 案: ${JSON.stringify(o.variant)}
 主な手法の成立条件: ${JSON.stringify(recipeFor(o.variant.technique))}
 submit_variant_review（requestId "${o.requestId}"）へ verdict、issues、evidence を送ってください。
 - 狙いに対して実際に見せているものが一致するか。例: 一段ずつ明かす狙いなのに最初からすべて見えている、拡大する狙いなのに拡大していない。
 - 元資料にない事実・因果・数値を断定していないか。invented の印だけでは、不正確な事実を発表してよいことにならない。計算した値は元の値から検算する。
+- 図のラベルや背景図形も事実を伝える。案にだけ出てくる曜日・時間帯・範囲・対象・数量を元資料と照合する。例えば「金曜だけ延長」から「通常は月〜金営業」は導けない。現状の図をもっともらしく埋めるために加えた条件を見逃さない。根拠がなければ削除するか、画像上で仮定の例と明示し実際は未確認と伝えるよう要求する。invented:true に変えるだけの修正は認めない。
+- 元資料にある重要な条件が消え、意味が変わっていないか。測定対象・期間や未検証の範囲、操作や承認の成立条件、提案と実績の区別を確認する。各案は単独で使うため、別の案、gaveUp、発表者の口頭補足にだけ残すことは認めない。必要な条件を読める注記か同じ案の後続コマに残す。無関係な詳細をすべて戻す必要はない。
 - 図の尺度と数値の対応、文字の重なり、主張を読むための十分な明暗差を確認する。
+- source.kind が library の素材は共通素材（アイコン・人物イラストなど）。資料の事実の根拠のように見せていないか（人物イラストを実在の利用者の証言のように扱う等）、意味の合わない飾りになっていないかを確認する。
+- source がある素材は別ページから選んだ画像。その画像と source.context を照合し、別の対象・期間の証拠にすり替えていないか、素材の中の文字が読めるか、縦横比が変わっていないかを確認する。
+- 数値を表す棒・面積・位置には尺度の整合を求める。数字の文字サイズは通常は強調であり、値に比例させる必要はない。「大きさそのものが量を表す」と案が明示する場合だけその対応を検査し、強調の大小だけを数値の誤りと判定しない。
 - 文字主体の表現が適切な場合もある。装飾不足、好み、珍しくないこと、元資料と同じ部分があることだけを理由に修正させない。
+- 手法の条件は同じ役割の要素どうしで比べる。例えば一項目を目立たせる案で見出しも太字でも、それだけで不成立にはならない。「もっと目立つ」「やや弱い」「こちらが望ましい」という改善余地は revise の理由にしない。意味を誤って伝える、必要な内容が読めない、約束した変化がない、という具体的な失敗に限る。
 - 明確な問題があれば revise とし、どのコマの何をどう直す必要があるかを最大5点書く。問題がなければ accept、issues は空にする。
 - evidence に画像と資料の具体的な対応を書く。効果を実証したという表現や点数は使わない。
 送り終えたら「完了」とだけ答えてください。`;

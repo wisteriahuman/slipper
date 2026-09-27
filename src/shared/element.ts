@@ -5,12 +5,12 @@ export {CANVAS} from './canvas';
 
 export const ElementSchema = z.object({
   id: z.string().regex(/^[\w-]{1,64}$/),
-  type: z.enum(['text', 'shape', 'asset']).describe('asset = 元のページの素材（画像・表・グラフ）。assetId で参照し、中身は変えない'),
+  type: z.enum(['text', 'shape', 'asset']).describe('asset = 渡された素材（元のページ、または選択した資料内の画像・図）。assetId で参照し、中身は変えない'),
   shape: z.enum(['rect', 'roundRect', 'ellipse', 'line']).optional().describe('type が shape のときの形'),
   text: z.string().max(2000).optional(),
   size: z.number().min(8).max(120).optional().describe('文字サイズ（px）'),
   bold: z.boolean().optional(),
-  color: z.string().optional().describe('文字色。テーマ色の名前（DARK1, LIGHT1, DARK2, LIGHT2, ACCENT1〜6）'),
+  color: z.string().optional().describe('文字色、またはアイコン素材の線の色。テーマ色の名前（DARK1, LIGHT1, DARK2, LIGHT2, ACCENT1〜6）'),
   fill: z.string().optional().describe('図形の塗り。テーマ色の名前'),
   opacity: z.number().min(0.1).max(1).optional().describe('図形の塗りの不透明度（1で不透明）。画面を覆って暗くするときなどに使う'),
   assetId: z.string().optional(),
@@ -37,4 +37,4 @@ export const VariantInputSchema = z.object(VariantInputShape);
 export type VariantInput = z.infer<typeof VariantInputSchema>;
 
 // technique is optional on stored variants: ones made before the catalog existed don't have it.
-export type Variant = Omit<VariantInput, 'technique'> & {technique?: string; id: string; approach: string | null; receivedAt: number; plan?: ProposalPlan; visualReview?: string; independentReview?: string};
+export type Variant = Omit<VariantInput, 'technique'> & {technique?: string; id: string; approach: string | null; receivedAt: number; plan?: ProposalPlan; visualReview?: string; independentReview?: string; assets?: import('./asset-pool').PoolAsset[]};

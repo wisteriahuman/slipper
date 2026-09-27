@@ -1,4 +1,5 @@
 // Shared by the panel and the image review renderer.
+export const SLIDE_LINE_WIDTH = 3;
 export const SLIDE_CSS = `
 .slide-stage { font-family: Arial, "Hiragino Sans", sans-serif; }
 .slide-frame { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; }

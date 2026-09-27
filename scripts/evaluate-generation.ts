@@ -1,8 +1,10 @@
 // Reproducible local evaluation. Uses synthetic source material and an isolated SQLite database;
 // exercises the real Controller, MCP server, Claude runner and Electron renderer. No Google writes.
 import {app} from 'electron';
-import {mkdirSync, writeFileSync} from 'node:fs';
-import {resolve} from 'node:path';
+import {mkdirSync, writeFileSync, readFileSync} from 'node:fs';
+import {resolve, dirname} from 'node:path';
+import {Library} from '../src/main/library';
+import {rasterize, shrink} from '../src/main/rasterize';
 import {Controller} from '../src/main/controller';
 import {Store} from '../src/main/store';
 import {SlipperMcpServer} from '../src/main/mcp-server';
@@ -47,11 +49,13 @@ app.whenReady().then(async()=>{
     batchUpdate:async()=>{throw new Error('Evaluation must not write to Google');}
   } as unknown as SlidesClient;
   const events:unknown[]=[];
-  const controller=new Controller({store,auth:{hasClient:()=>true,isConnected:()=>true,hasAllScopes:()=>true} as unknown as GoogleAuth,slides:fakeSlides,drive:{} as DriveClient,browsers:[],openPresentation:()=>{},renderVariant:async(v,c)=>{
-    const r=await renderVariant(v,c);events.push({kind:'preview',requestId:v.requestId,technique:v.technique,problems:r.problems});
+  // The bundled library only; set SLIPPER_EVAL_LIBRARY=0 to compare against generation without it.
+  const library=process.env.SLIPPER_EVAL_LIBRARY==='0' ? undefined : new Library({store,dataDir:output,lucideDir:dirname(require.resolve('lucide-static/package.json')),peepsDir:resolve('resources/library/open-peeps'),rasterize,shrink});
+  const controller=new Controller({store,library,auth:{hasClient:()=>true,isConnected:()=>true,hasAllScopes:()=>true} as unknown as GoogleAuth,slides:fakeSlides,drive:{} as DriveClient,browsers:[],openPresentation:()=>{},renderVariant:async(v,c)=>{
+    const r=await renderVariant(v,c);events.push({kind:'preview',requestId:v.requestId,technique:v.technique,problems:r.problems,draft:v});
     console.log('Preview',v.technique,r.problems.length ? r.problems.join(';') : 'ok');return r;
   }});
-  const server=new SlipperMcpServer({submitVariantReview:r=>controller.submitVariantReview(r),currentPage:d=>controller.currentPageForConversation(d),pageImages:id=>controller.pageImages(id),submitProposalPlan:async p=>{events.push({kind:'plan',...p});return controller.submitProposalPlan(p);},previewVariant:v=>controller.previewVariant(v),submitVariant:async v=>{const r=await controller.submitVariant(v);events.push({kind:'submit',requestId:v.requestId,visualReview:v.visualReview,problems:r});return r;},submitStoryline:s=>controller.submitStoryline(s),submitDeckReading:r=>controller.submitDeckReading(r),submitPageReading:r=>controller.submitPageReading(r)});
+  const server=new SlipperMcpServer({submitVariantReview:async r=>{const errors=await controller.submitVariantReview(r);events.push({kind:'review',...r,errors});console.log('Review',r.verdict,r.issues.join(';'));return errors;},currentPage:d=>controller.currentPageForConversation(d),pageImages:id=>controller.pageImages(id),submitProposalPlan:async p=>{events.push({kind:'plan',...p});return controller.submitProposalPlan(p);},previewVariant:v=>controller.previewVariant(v),submitVariant:async v=>{const r=await controller.submitVariant(v);events.push({kind:'submit',requestId:v.requestId,visualReview:v.visualReview,problems:r});return r;},submitStoryline:s=>controller.submitStoryline(s),submitDeckReading:r=>controller.submitDeckReading(r),submitPageReading:r=>controller.submitPageReading(r),searchLibrary:async q=>{const found=await controller.searchLibrary(q);events.push({kind:'search',...q,found:found.map(a=>a.description)});console.log('Search',q.query,found.length);return found;}});
   await server.start();controller.attachMcp(server.url,server.token);
   const results:unknown[]=[];
   try{
@@ -60,16 +64,30 @@ app.whenReady().then(async()=>{
       controller.onLocation(f.id,f.id);
       await new Promise<void>((resolve,reject)=>{if(controller.getState().page?.pageId===f.id){resolve();return;}const timeout=setTimeout(()=>{unsub();reject(new Error('load timeout'));},5000);const unsub=controller.subscribe(s=>{if(s.page?.pageId===f.id){clearTimeout(timeout);unsub();resolve();}});});
       console.log('START',f.id);
+      const started=Date.now();
+      // Replay a known failure through the current renderer and independent critic without
+      // asking a generator to produce a different example. Use SLIPPER_EVAL_CASES for its source.
+      if (process.env.SLIPPER_EVAL_REPLAY) {
+        const replay=JSON.parse(readFileSync(process.env.SLIPPER_EVAL_REPLAY,'utf8')) as {variant:VariantInput;expect:'accept'|'reject'};
+        const {requestId}=await controller.currentPageForConversation(undefined);
+        const variant={...replay.variant,requestId};
+        const preview=await controller.previewVariant(variant);
+        const problems=preview.problems.length ? preview.problems : await controller.submitVariant({...variant,previewToken:preview.previewToken,visualReview:'既知の失敗例を同じ内容で再検査する'});
+        const actual=problems.length ? 'reject':'accept';
+        writeFileSync(resolve(output,'replay.json'),JSON.stringify({fixture:f.id,expected:replay.expect,actual,problems,events},null,2));
+        if(actual!==replay.expect) process.exitCode=1;
+        console.log('REPLAY',actual,problems);continue;
+      }
       const result=await controller.requestVariants({direction:'',deep:false});
       const variants=store.listVariants(f.id,f.id);
-      results.push({fixture:f,result,count:variants.length,variants});
+      results.push({fixture:f,result,count:variants.length,seconds:(Date.now()-started)/1000,variants});
       if (!result.ok || variants.length !== 3) process.exitCode = 1;
       for(const [i,v] of variants.entries()){
-        const rendered=await renderVariant(v as VariantInput,context);
+        const rendered=await renderVariant(v as VariantInput,{...context,assets:[...context.assets,...(v.assets ?? [])]});
         for(const [j,im] of rendered.images.entries())writeFileSync(resolve(output,`${f.id}-v${i+1}-f${j+1}.png`),Buffer.from(im.base64,'base64'));
       }
       writeFileSync(resolve(output,'results.json'),JSON.stringify({results,events},null,2));
       console.log('DONE',f.id,variants.length,result.message,controller.getState().notices);
     }
-  }finally{controller.dispose();server.stop();store.close();app.quit();}
+  }finally{controller.dispose();server.stop();store.close();app.exit(process.exitCode ? Number(process.exitCode) : 0);}
 }).catch(e=>{console.error(e);app.exit(1);});

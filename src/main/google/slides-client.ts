@@ -41,16 +41,30 @@ export class SlidesClient {
   page = (presentationId: string, pageId: string) =>
     this.call<ApiPage>(`${encodeURIComponent(presentationId)}/pages/${encodeURIComponent(pageId)}`);
 
+  // The revision and elements must come from the same response for conditional writes.
+  async editingPage(presentationId: string, pageId: string) {
+    const p = await this.call<{revisionId?: string; pageSize?: {width?: {magnitude?: number; unit?: string}; height?: {magnitude?: number; unit?: string}}; slides?: ApiPage[]}>(`${encodeURIComponent(presentationId)}?fields=${encodeURIComponent('revisionId,pageSize,slides')}`);
+    const page = p.slides?.find(s => s.objectId === pageId);
+    if (!page) throw new Error('このページは削除されたか、移動しています。Google Slides でページを選び直してください');
+    if (!p.revisionId) throw new Error('編集用の版を取得できません。この資料の編集権限を確認してください');
+    const emu = (d: {magnitude?: number; unit?: string} | undefined, fallback: number) => d?.magnitude === undefined ? fallback : d.magnitude * (d.unit === 'PT' ? 12700 : 1);
+    return {page, size: {width: emu(p.pageSize?.width, 9144000), height: emu(p.pageSize?.height, 5143500)}, revisionId: p.revisionId};
+  }
+
   // A rendered image of the page as Google draws it, returned as a data URL. Google's image URLs
   // expire after about 30 minutes and fail when many are loaded at once from the panel, so the
   // bytes are fetched here, one request at a time per caller.
   async thumbnail(presentationId: string, pageId: string, size: 'SMALL' | 'MEDIUM' | 'LARGE' = 'LARGE'): Promise<string> {
+    return (await this.thumbnailImage(presentationId,pageId,size)).dataUrl;
+  }
+
+  async thumbnailImage(presentationId: string, pageId: string, size: 'SMALL' | 'MEDIUM' | 'LARGE' = 'LARGE') {
     const {contentUrl} = await this.call<{contentUrl: string}>(`${encodeURIComponent(presentationId)}/pages/${encodeURIComponent(pageId)}/thumbnail?thumbnailProperties.thumbnailSize=${size}`);
     const res = await fetch(contentUrl);
     if (!res.ok) throw new Error(`ページ画像を取得できませんでした: ${res.status}`);
-    return `data:${res.headers.get('content-type') ?? 'image/png'};base64,${Buffer.from(await res.arrayBuffer()).toString('base64')}`;
+    return {contentUrl,dataUrl:`data:${res.headers.get('content-type') ?? 'image/png'};base64,${Buffer.from(await res.arrayBuffer()).toString('base64')}`};
   }
 
-  batchUpdate = (presentationId: string, requests: object[]) =>
-    this.call(`${encodeURIComponent(presentationId)}:batchUpdate`, {method: 'POST', body: JSON.stringify({requests})});
+  batchUpdate = (presentationId: string, requests: object[], requiredRevisionId?: string) =>
+    this.call(`${encodeURIComponent(presentationId)}:batchUpdate`, {method: 'POST', body: JSON.stringify({requests, ...(requiredRevisionId ? {writeControl: {requiredRevisionId}} : {})})});
 }

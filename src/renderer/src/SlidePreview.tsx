@@ -1,4 +1,4 @@
-import {SLIDE_CSS} from '@shared/slide-style';
+import {SLIDE_CSS, SLIDE_LINE_WIDTH} from '@shared/slide-style';
 import type {PointerEvent as ReactPointerEvent} from 'react';
 import {CANVAS} from '@shared/canvas';
 import type {SlideElement} from '@shared/element';
@@ -7,6 +7,9 @@ import type {DecorationView, PageAssetView} from '@shared/ipc';
 
 // Neutral fallbacks for decks whose theme colors could not be read.
 const FALLBACK: Record<string, string> = {DARK1: '#1f1f1f', LIGHT1: '#ffffff', DARK2: '#5f6368', LIGHT2: '#eeeeee'};
+// Works in both the panel (browser) and the main-process renderer (Node).
+const toBase64 = (text: string) => typeof Buffer !== 'undefined' ? Buffer.from(text).toString('base64') : btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+
 export const hexOf = (palette: Palette, ref: string | undefined, fallback: string) => colorHex(palette, ref, FALLBACK[ref ?? ''] ?? fallback);
 
 type Props = {
@@ -36,6 +39,9 @@ export function SlidePreview({elements, palette, assets, decorations, width, pag
           );
           if (e.type === 'asset') {
             const asset = assets.find(a => a.id === e.assetId);
+            // Icons are recolored from their SVG; the PNG keeps the default dark line.
+            const src = asset?.svg && e.color ? `data:image/svg+xml;base64,${toBase64(asset.svg.replace(/currentColor/g, hexOf(palette, e.color, '#3c4043')))}` : asset?.previewUrl;
+            if(src) return <div key={e.id} className={`${cls} cropped`} {...handlers} style={box}><img src={src} alt={asset!.description} draggable={false} /></div>;
             // Scale the page image so the asset's original box fills the element's box.
             const crop = asset && pageImage && asset.w > 0 && asset.h > 0 ? {
               backgroundImage: `url(${pageImage})`, backgroundRepeat: 'no-repeat',
@@ -54,7 +60,7 @@ export function SlidePreview({elements, palette, assets, decorations, width, pag
           }
           if (e.shape === 'line') return (
             <svg key={e.id} data-element-id={e.id} className={cls} {...handlers} style={{...box, overflow: 'visible'}} viewBox={`0 0 ${e.w} ${e.h}`} preserveAspectRatio="none">
-              <line x1="0" y1="0" x2={e.w} y2={e.h} stroke={hexOf(palette, e.fill, '#5f6368')} strokeWidth="3" vectorEffect="non-scaling-stroke" />
+              <line x1="0" y1="0" x2={e.w} y2={e.h} stroke={hexOf(palette, e.fill, '#5f6368')} strokeWidth={SLIDE_LINE_WIDTH} vectorEffect="non-scaling-stroke" />
             </svg>
           );
           return <div key={e.id} data-element-id={e.id} className={cls} {...handlers} style={{...box, background: e.fill ? hexOf(palette, e.fill, '#ddd') : 'transparent', opacity: e.opacity ?? 1, borderRadius: e.shape === 'ellipse' ? '50%' : e.shape === 'roundRect' ? 16 : 0}} />;

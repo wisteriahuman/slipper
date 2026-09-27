@@ -9,7 +9,7 @@ import {join} from 'node:path';
 export type RunSettings = {model: string; fallbackModel: string; effort: 'medium' | 'high'};
 export const DEFAULT_SETTINGS: RunSettings = {model: 'sonnet', fallbackModel: 'opus', effort: 'medium'};
 
-export type SubmitTool = 'submit_variant_review' | 'submit_proposal_plan' | 'submit_variant' | 'submit_storyline' | 'submit_deck_reading' | 'submit_page_reading';
+export type SubmitTool = 'submit_text_refinement_review' | 'submit_text_refinement' | 'submit_variant_review' | 'submit_proposal_plan' | 'submit_variant' | 'submit_storyline' | 'submit_deck_reading' | 'submit_page_reading';
 
 export type RunResult = {ok: boolean; seconds: number; models: string[]; error?: string};
 // Progress worth showing while waiting: the AI service being busy is common and otherwise looks like a hang.
@@ -31,7 +31,7 @@ export class ClaudeRunner {
     // --fallback-model: when the main model is overloaded, Claude Code switches instead of retrying for minutes.
     const args = ['-p', prompt, '--model', settings.model, '--fallback-model', settings.fallbackModel, '--effort', settings.effort,
       '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
-      '--tools', '', '--strict-mcp-config', '--mcp-config', this.configFile, '--allowedTools', `mcp__slipper__${tool}`, 'mcp__slipper__get_page_images', ...(tool === 'submit_variant' ? ['mcp__slipper__preview_variant'] : [])];
+      '--tools', '', '--strict-mcp-config', '--mcp-config', this.configFile, '--allowedTools', `mcp__slipper__${tool}`, 'mcp__slipper__get_page_images', ...(tool === 'submit_variant' ? ['mcp__slipper__preview_variant', 'mcp__slipper__search_library'] : []), ...(tool === 'submit_proposal_plan' ? ['mcp__slipper__search_library'] : [])];
     const started = Date.now();
     return new Promise(resolve => {
       const child = spawn('claude', args, {cwd: this.dir, stdio: ['ignore', 'pipe', 'pipe']});

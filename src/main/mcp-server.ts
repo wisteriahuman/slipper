@@ -6,6 +6,7 @@ import {createServer, type Server} from 'node:http';
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {z} from 'zod';
+import {TextRefinementShape, TextReviewShape, type TextRefinement, type TextReview} from '@shared/text-refinement';
 import {VariantReviewShape, type VariantReview} from '@shared/variant-review';
 import {PlanInputShape, type PlanInput} from '@shared/proposal-plan';
 import type {PreviewResult} from './variant-preview';
@@ -14,6 +15,8 @@ import {StorylineInputShape, type StorylineInput} from '@shared/storyline';
 import {DeckReadingInputShape, PageReadingInputShape, type DeckReadingInput, type PageReadingInput} from '@shared/reading';
 
 export type McpHandlers = {
+  submitTextRefinement?(input: TextRefinement): Promise<string[]>;
+  submitTextRefinementReview?(input: TextReview): Promise<string[]>;
   // Creates a conversation request for the page shown in the editor and returns what the AI needs.
   currentPage(direction: string | undefined): Promise<object>;
   // Validates and stores a variant; returns problems for the AI to fix, or [] when accepted.
@@ -28,6 +31,8 @@ export type McpHandlers = {
   submitPageReading(input: PageReadingInput): Promise<string[]>;
   // Rendered images of the pages a request is about, so the AI sees charts, highlights and sequences.
   pageImages(requestId: string): Promise<Array<{label: string; base64: string; mimeType: string}>>;
+  // App-wide assets (icons, people, the user's imported images) that a request may then use by assetId.
+  searchLibrary(input: {requestId: string; query: string; kind?: 'icon' | 'illustration' | 'photo'}): Promise<Array<{id: string; kind: string; description: string; w: number; h: number; previewUrl: string; source: {context: string}}>>;
 };
 
 const text = (t: string, isError = false) => ({content: [{type: 'text' as const, text: t}], ...(isError ? {isError: true} : {})});
@@ -41,6 +46,18 @@ export class SlipperMcpServer {
 
   private build() {
     const server = new McpServer({name: 'slipper', version: '0.1.0'});
+    if (this.handlers.submitTextRefinementReview) server.registerTool('submit_text_refinement_review', {
+      description: '文章候補の条件・意味・手順を元文章と照合した結果を返す', inputSchema: TextReviewShape
+    }, async input => {
+      const problems = await this.handlers.submitTextRefinementReview!(input);
+      return problems.length ? text(problems.join('\n'), true) : text('確認結果を受け取りました');
+    });
+    if (this.handlers.submitTextRefinement) server.registerTool('submit_text_refinement', {
+      description: '選択した文章の書き換え候補を返す。共有資料は変更しない', inputSchema: TextRefinementShape
+    }, async input => {
+      const problems = await this.handlers.submitTextRefinement!(input);
+      return problems.length ? text(problems.join('\n'), true) : text('文章の候補を受け取りました');
+    });
     server.registerTool('get_current_page', {
       description: 'Slipper の左側で表示中のスライドの内容、資料全体の「誰に・何を」、使える色と意味、そのページで既に出た案の狙いを返す。呼ぶと依頼が1件記録され、submit_variant に渡す requestId が発行される',
       inputSchema: {direction: z.string().max(200).optional().describe('利用者から伝えられた一言の方向（任意）')}
@@ -56,6 +73,17 @@ export class SlipperMcpServer {
         const images = await this.handlers.pageImages(requestId);
         if (!images.length) return text('画像を取得できませんでした', true);
         return {content: images.flatMap(i => [{type: 'text' as const, text: i.label}, {type: 'image' as const, data: i.base64, mimeType: i.mimeType}])};
+      } catch (e) { return text((e as Error).message, true); }
+    });
+    server.registerTool('search_library', {
+      description: '共通素材（アイコン・人物イラスト・利用者が取り込んだ画像）を探す。見つかった素材は、この依頼で type "asset" と assetId で使える。アイコンのタグは英語なので、英語と日本語の両方で探す',
+      inputSchema: {requestId: z.string(), query: z.string().min(1).max(100).describe('探す言葉。空白区切りで複数可。例: "user person 人物"'), kind: z.enum(['icon', 'illustration', 'photo']).optional()}
+    }, async input => {
+      try {
+        const found = await this.handlers.searchLibrary(input);
+        if (!found.length) return text('見つかりませんでした。別の言葉（英語・日本語）で探してください');
+        return {content: [{type: 'text' as const, text: JSON.stringify(found.map(a => ({assetId: a.id, kind: a.kind, description: a.description, w: a.w, h: a.h, terms: a.source.context, ...(a.kind === 'icon' ? {color: '要素の color で線の色を変えられる'} : {})})))},
+          ...found.flatMap(a => { const m = /^data:([^;]+);base64,(.*)$/.exec(a.previewUrl); return m ? [{type: 'text' as const, text: a.id}, {type: 'image' as const, data: m[2]!, mimeType: m[1]!}] : []; })]};
       } catch (e) { return text((e as Error).message, true); }
     });
     server.registerTool('submit_variant_review', {description:'画像と元資料を照合した見直しの結果を送る', inputSchema:VariantReviewShape}, async input => {

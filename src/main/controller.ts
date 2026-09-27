@@ -2,18 +2,23 @@
 // receives variants over MCP, and writes an adopted variant back as a new page.
 import {VariantReviewSchema, type VariantReview} from '@shared/variant-review';
 import {PreviewReviews} from './preview-review';
+import {catalogItems, resolvePoolAsset} from './asset-pool';
+import type {Library} from './library';
+import {creditPageRequests, creditsText, CREDITS_PAGE} from './credits';
+import type {LibraryItem, LibraryPatch} from '@shared/library';
+import {MAX_POOL_SELECTION, type PoolAsset} from '@shared/asset-pool';
 import type {PreviewContext, PreviewResult, RenderVariant} from './variant-preview';
 import {PLAN_PAGE, PLAN_FLOW, PlanInputSchema, validatePlan, type PlanInput, type ProposalPlan} from '@shared/proposal-plan';
 import {randomBytes} from 'node:crypto';
-import {VariantInputSchema, type VariantInput} from '@shared/element';
+import {VariantInputSchema, type SlideElement, type VariantInput} from '@shared/element';
 import type {PageSize} from '@shared/geometry';
 import type {AdoptInput, PanelState} from '@shared/ipc';
-import type {ColorMeaning} from '@shared/palette';
+import {colorHex, type ColorMeaning} from '@shared/palette';
 import {validateVariant} from '@shared/validate';
 import {StorylineInputSchema, validateStoryline, type StorylineInput} from '@shared/storyline';
 import {contentKey, DeckReadingInputSchema, PageReadingInputSchema, validateDeckReading, type DeckReading, type DeckReadingInput, type PageReadingInput} from '@shared/reading';
 import {ClaudeRunner, DEFAULT_SETTINGS} from './claude-runner';
-import {continuesPrevious, planSequence, toDecorations, toPageContent, toPalette, type ApiColorScheme, type ApiPage, type Decoration, type PageContent} from './google/convert';
+import {continuesPrevious, imageKey, planSequence, toDecorations, toPageContent, toPalette, type ApiColorScheme, type ApiPage, type Decoration, type PageContent} from './google/convert';
 import type {GoogleAuth} from './google/oauth';
 import type {SlidesClient} from './google/slides-client';
 import {buildVariantReviewPrompt, buildPlanPrompt, buildDeckReadingPrompt, buildPageReadingPrompt, buildStorylinePrompt, buildVariantPrompt, colorGuide, type DeckPage} from './prompt';
@@ -37,7 +42,20 @@ function techniqueProblems(id: string, assigned: string | null, level: 'page' | 
   return [];
 }
 const pageKey = (c: PageContent) => contentKey(c.texts.map(t => t.text), c.assets.map(a => a.id));
+const poolImages = (assets: PageContent['assets']) => assets.flatMap(a=>{
+  const m=a.source && a.previewUrl && /^data:([^;]+);base64,(.*)$/.exec(a.previewUrl);
+  const label=a.source?.kind==='library' ? `共通素材 ${a.id}：${a.description}（${a.source.context}）` : `選択した素材 ${a.id}：${a.description}。出典ページ ${a.source?.pageId}。元の文脈：${a.source?.context}`;
+  return m ? [{label,mimeType:m[1]!,base64:m[2]!}] : [];
+});
 
+
+// Credits the terms ask to show where the asset is used: a small line at the bottom of that slide.
+function withNearCredits(elements: SlideElement[], library: PoolAsset[], frame: number): SlideElement[] {
+  const ids = new Set(elements.filter(e => e.type === 'asset').map(e => e.assetId));
+  const lines = library.filter(a => ids.has(a.id) && a.source.library?.nearUse && a.source.library.credit).map(a => a.source.library!.credit!);
+  if (!lines.length) return elements;
+  return [...elements, {id: `credit_${frame}`, type: 'text', text: [...new Set(lines)].join(' ／ '), x: 16, y: 514, w: 928, h: 22, size: 12, color: 'DARK1', invented: false}];
+}
 
 export class Controller {
   private state: PanelState;
@@ -59,12 +77,15 @@ export class Controller {
   private seenReviewImages = new Set<string>();
   private reviewVerdicts = new Map<string, VariantReview>();
   private reviewAttempts = new Map<string, number>();
+  private poolJob = 0;
+  // Library assets the AI found for each request; they become usable assets of that request.
+  private offers = new Map<string, Map<string, PoolAsset>>();
   private listeners = new Set<(s: PanelState) => void>();
 
-  constructor(private deps: {store: Store; auth: GoogleAuth; slides: SlidesClient; drive: DriveClient; renderVariant: RenderVariant; browsers: PanelState['browsers']; openPresentation: (id: string) => void}) {
+  constructor(private deps: {store: Store; auth: GoogleAuth; slides: SlidesClient; drive: DriveClient; library?: Library; renderVariant: RenderVariant; browsers: PanelState['browsers']; openPresentation: (id: string) => void}) {
     this.state = {location: {presentationId: null, pageId: null}, signedIn: false, browsers: deps.browsers,
       google: this.googleState(),
-      deck: null, page: null, pageError: null, variants: [], running: null, storylines: [], deckReading: null, thumbnails: {}, notices: [], mcp: null};
+      deck: null, page: null, pageError: null, variants: [], assetPool:{items:[],assets:[],loading:false,error:null}, library: deps.library?.state() ?? {imported:[],bundled:[]}, running: null, storylines: [], deckReading: null, thumbnails: {}, notices: [], mcp: null};
   }
 
   attachMcp(url: string, token: string) {
@@ -90,7 +111,7 @@ export class Controller {
     const prev = this.state.location;
     if (prev.presentationId === presentationId && prev.pageId === pageId) return;
     this.update({location: {presentationId, pageId}});
-    if (prev.presentationId !== presentationId) this.update({deck: null, storylines: [], deckReading: null, thumbnails: {}});
+    if (prev.presentationId !== presentationId) { this.poolJob++; this.update({deck: null, storylines: [], deckReading: null, thumbnails: {},assetPool:{...(presentationId ? this.deps.store.getAssetPool(presentationId) : {items:[],assets:[]}),loading:false,error:null}}); }
     void this.reloadPage();
   }
 
@@ -170,18 +191,69 @@ export class Controller {
     return {ok: true, message: '保存しました'};
   }
 
+  async scanAssets(): Promise<Result> {
+    const id=this.state.location.presentationId;
+    if(!id || this.state.assetPool.loading || this.state.running) return {ok:false,message:'資料を開き、処理が終わってから素材を読み込んでください'};
+    const job=++this.poolJob;
+    this.update({assetPool:{...this.state.assetPool,loading:true,error:null}});
+    try {
+      const previous=this.deps.store.getAssetPool(id);
+      const items=catalogItems(await this.deps.slides.allSlides(id));
+      for(const item of items) {
+        if(job!==this.poolJob) return {ok:false,message:'表示する資料が変わりました'};
+        item.selected=previous.items.some(p=>p.id===item.id && p.selected);
+        if(item.kind==='page') item.previewUrl=await this.deps.slides.thumbnail(id,item.pageId,'SMALL').catch(()=>undefined);
+      }
+      const assets:PoolAsset[]=[];
+      for(const item of items.filter(x=>x.selected)) assets.push((await resolvePoolAsset(this.deps.slides,id,item)).asset);
+      if(job!==this.poolJob) return {ok:false,message:'表示する資料が変わりました'};
+      this.deps.store.saveAssetPool(id,items,assets);
+      this.update({assetPool:{items,assets,loading:false,error:null}});
+      return {ok:true,message:`${items.length}件の素材を読み込みました`};
+    } catch(e) {
+      const message=(e as Error).message;
+      if(job===this.poolJob) this.update({assetPool:{...this.state.assetPool,loading:false,error:message}});
+      return {ok:false,message};
+    }
+  }
+
+  async selectAsset(assetId:string,selected:boolean): Promise<Result> {
+    const id=this.state.location.presentationId, pool=this.state.assetPool;
+    if(!id || pool.loading || this.state.running) return {ok:false,message:'処理が終わってから選んでください'};
+    const item=pool.items.find(x=>x.id===assetId);
+    if(!item) return {ok:false,message:'素材が見つかりません'};
+    if(selected && !item.selected && pool.assets.length>=MAX_POOL_SELECTION) return {ok:false,message:`一度に選べる素材は${MAX_POOL_SELECTION}件です`};
+    const job=++this.poolJob;
+    this.update({assetPool:{...pool,loading:true,error:null}});
+    try {
+      const assets=pool.assets.filter(x=>x.id!==assetId);
+      if(selected) assets.push((await resolvePoolAsset(this.deps.slides,id,item)).asset);
+      if(job!==this.poolJob) return {ok:false,message:'表示する資料が変わりました'};
+      const items=pool.items.map(x=>x.id===assetId ? {...x,selected}:x);
+      this.deps.store.saveAssetPool(id,items,assets);
+      this.update({assetPool:{items,assets,loading:false,error:null}});
+      return {ok:true,message:selected?'案で使える素材に追加しました':'選択を外しました'};
+    } catch(e) {
+      const message=(e as Error).message;
+      if(job===this.poolJob) this.update({assetPool:{...pool,loading:false,error:message}});
+      return {ok:false,message};
+    }
+  }
+
   private ready(): {presentationId: string; pageId: string; content: PageContent; brief: Brief} {
     const {presentationId, pageId} = this.state.location;
     if (!presentationId || !pageId) throw new Error('左で資料のページを開いてください');
     if (!this.pageContent || this.pageContent.pageId !== pageId) throw new Error('ページの内容をまだ読み込めていません');
     const brief = this.deps.store.getBrief(presentationId);
     if (!brief) throw new Error('先に資料の「誰に・何を」を書いてください');
-    return {presentationId, pageId, content: this.pageContent, brief};
+    const selected=this.deps.store.getAssetPool(presentationId).assets;
+    return {presentationId, pageId, content: {...this.pageContent,assets:[...this.pageContent.assets,...selected]}, brief};
   }
 
   async requestVariants(input: {direction: string; deep: boolean}): Promise<Result> {
     if (!this.runner) return {ok: false, message: 'MCP サーバーが起動していません'};
     if (this.state.running) return {ok: false, message: '前の依頼を処理中です'};
+    if (this.state.assetPool.loading) return {ok:false,message:'素材の読み込みが終わるまでお待ちください'};
     this.update({running: {kind:'page',pending:3,startedAt:Date.now(),deep:input.deep,status:'ページを読み込んでいます'}});
     await this.reloadPage();
     let ctx;
@@ -206,7 +278,7 @@ export class Controller {
         const requestId = this.deps.store.createRequest({presentationId: ctx.presentationId, pageId: ctx.pageId, source: 'button', direction, approach, model: settings.model, effort: settings.effort, snapshot: ctx.content});
         this.assignedPlans.set(requestId, plan);
         this.previewContexts.set(requestId, previewContext);
-        const result = await runner.run(buildVariantPrompt({requestId, brief: ctx.brief, palette, page: ctx.content, decorations: previewContext.decorations, flowRole, technique: approach, plan, direction}), settings, 'submit_variant', p => {
+        const result = await runner.run(buildVariantPrompt({requestId, brief: ctx.brief, palette, page: ctx.content, decorations: previewContext.decorations, flowRole, technique: approach, plan, direction, library: this.librarySummary()}), settings, 'submit_variant', p => {
           if (this.state.running) this.update({running: {...this.state.running, status: `AI 側が混雑しています（再試行 ${p.attempt}/${p.maxRetries}）。混み続ける場合は別のモデルに切り替えます`}});
         });
         if (result.models.some(m => m.includes(settings.fallbackModel))) this.update({running: this.state.running && {...this.state.running, status: '混雑のため、別のモデルで考えています'}});
@@ -214,7 +286,7 @@ export class Controller {
         const delivered = this.deps.store.listVariants(ctx.presentationId, ctx.pageId).some(v => v.requestId === requestId);
         const error = result.ok ? (delivered ? undefined : '案が届きませんでした') : result.error;
         this.deps.store.finishRequest(requestId, error ? 'failed' : 'done', error);
-        this.assignedPlans.delete(requestId); this.previewContexts.delete(requestId); this.reviews.clear(requestId); this.renderedDrafts.delete(requestId); this.reviewAttempts.delete(requestId); this.clearRequestImages(requestId);
+        this.assignedPlans.delete(requestId); this.previewContexts.delete(requestId); this.offers.delete(requestId); this.reviews.clear(requestId); this.renderedDrafts.delete(requestId); this.reviewAttempts.delete(requestId); this.clearRequestImages(requestId);
         if (error) this.notice(`「${techniqueLabel(approach)}」の案: ${error}`);
         this.update({running: this.state.running && {...this.state.running, pending: this.state.running.pending - 1}});
       }));
@@ -227,7 +299,7 @@ export class Controller {
     const level = o.pageId === DECK ? 'flow' : 'page';
     this.setRunningStatus('内容に合う、狙いの異なる3案を考えています');
     const requestId = this.deps.store.createRequest({...o, source: 'button', approach: level === 'page' ? PLAN_PAGE : PLAN_FLOW});
-    const result = await this.runner!.run(buildPlanPrompt({requestId, level, brief: o.brief, material: o.material, used: this.deps.store.techniquesUsed(o.presentationId, o.pageId), direction: o.direction}), {...DEFAULT_SETTINGS, effort: o.deep ? 'high' : 'medium'}, 'submit_proposal_plan');
+    const result = await this.runner!.run(buildPlanPrompt({requestId, level, brief: o.brief, material: o.material, used: this.deps.store.techniquesUsed(o.presentationId, o.pageId), direction: o.direction, library: this.librarySummary()}), {...DEFAULT_SETTINGS, effort: o.deep ? 'high' : 'medium'}, 'submit_proposal_plan');
     const plans = this.plans.get(requestId);
     this.plans.delete(requestId); this.clearRequestImages(requestId);
     this.deps.store.finishRequest(requestId, result.ok && plans ? 'done' : 'failed', result.error);
@@ -262,7 +334,7 @@ export class Controller {
       review: 'preview_variant で案を描画して見直し、同じ内容に previewToken と visualReview を添えて submit_variant する',
       requestId, canvas: {width: 960, height: 540}, brief: ctx.brief, fixedDecorations: this.decorations.map(({x, y, w, h, kind}) => ({x, y, w, h, kind})),
       colors: colorGuide(palette),
-      page: {texts: ctx.content.texts.map(t => ({id: t.id, text: t.text})), assets: ctx.content.assets.map(a => ({assetId: a.id, kind: a.kind, description: a.description}))},
+      page: {texts: ctx.content.texts.map(t => ({id: t.id, text: t.text})), assets: ctx.content.assets.map(a => ({assetId: a.id, kind: a.kind, description: a.description,source:a.source}))},
       existingAims: this.state.variants.map(v => v.aim)
     };
   }
@@ -277,7 +349,7 @@ export class Controller {
     if (request.approach === PLAN_PAGE || request.approach === PLAN_FLOW) return ['これは狙いを考える依頼です'];
     if (request.approach === PAGE_READING) return ['これはページの読み解きの依頼です。submit_page_reading を使ってください'];
     if (request.status !== 'pending') return ['この依頼はもう締め切られています'];
-    const assetIds = request.snapshot.assets.map(a => a.id);
+    const assetIds = [...request.snapshot.assets.map(a => a.id), ...(this.offers.get(input.requestId)?.keys() ?? [])];
     const problems = [...techniqueProblems(parsed.data.technique, request.approach, 'page'), ...validateVariant(parsed.data, {assetIds, palette: this.previewContexts.get(input.requestId)?.palette ?? this.palette(request.presentationId)})];
     return problems;
   }
@@ -290,7 +362,7 @@ export class Controller {
     if (problems.length) return {images: [], problems};
     const context = this.previewContexts.get(input.requestId);
     if (!context) return {images: [], problems: ['描画する元のページを再取得して依頼してください']};
-    if (input.frames.some(f => f.elements.some(e => e.type === 'asset')) && !context.pageImage) return {images: [], problems: ['元のページ画像がないため素材の見た目を確認できません。ページを再読み込みしてください']};
+    if (input.frames.some(f => f.elements.some(e => e.type === 'asset' && !context.assets.find(a=>a.id===e.assetId)?.previewUrl)) && !context.pageImage) return {images: [], problems: ['元のページ画像がないため素材の見た目を確認できません。ページを再読み込みしてください']};
     const rendered = await this.deps.renderVariant(parsed.data, context);
     if (this.deps.store.getRequest(input.requestId)?.status !== 'pending') return {images: [], problems: ['依頼は終了しています']};
     this.renderedDrafts.set(input.requestId, rendered.images);
@@ -308,7 +380,9 @@ export class Controller {
     const review = await this.reviewDraft(parsed.data);
     if (review.verdict === 'revise') return review.issues;
     if (this.deps.store.getRequest(input.requestId)?.status !== 'pending' || !this.reviews.accepts(parsed.data, input.previewToken)) return ['依頼が終了したか、別の案が描画されました'];
-    const variant = this.deps.store.addVariant(parsed.data, {plan: this.assignedPlans.get(input.requestId), visualReview: input.visualReview, independentReview: review.evidence});
+    const used=new Set(parsed.data.frames.flatMap(f=>f.elements).map(e=>e.assetId));
+    const assets=[...(this.deps.store.getRequest(input.requestId)?.snapshot.assets ?? []),...(this.offers.get(input.requestId)?.values() ?? [])].filter(a=>a.source && a.previewUrl && used.has(a.id)) as PoolAsset[];
+    const variant = this.deps.store.addVariant(parsed.data, {plan: this.assignedPlans.get(input.requestId), visualReview: input.visualReview, independentReview: review.evidence,assets});
     this.reviews.clear(input.requestId);
     if (this.state.location.presentationId === request.presentationId && this.state.location.pageId === request.pageId)
       this.update({variants: [variant, ...this.state.variants]});
@@ -337,10 +411,12 @@ export class Controller {
     if (!this.runner || !images || !brief) return fail('見直しに必要な画像・資料情報がありません');
     const requestId = this.deps.store.createRequest({presentationId:parent.presentationId, pageId:parent.pageId, source:'button', approach:'__variant_review__', snapshot:parent.snapshot});
     const original = context.pageImage && /^data:([^;]+);base64,(.*)$/.exec(context.pageImage);
-    this.reviewImages.set(requestId, [...(original ? [{label:'元のページ',mimeType:original[1]!,base64:original[2]!}] : []), ...images]);
+    const usedIds = new Set(variant.frames.flatMap(f => f.elements).map(e => e.assetId));
+    const source = {...parent.snapshot, assets: [...parent.snapshot.assets, ...[...(this.offers.get(variant.requestId)?.values() ?? [])].filter(a => usedIds.has(a.id))]};
+    this.reviewImages.set(requestId, [...(original ? [{label:'元のページ',mimeType:original[1]!,base64:original[2]!}] : []), ...poolImages(source.assets), ...images]);
     this.setRunningStatus('画像と根拠を別の視点で確認しています');
     try {
-      const result = await this.runner.run(buildVariantReviewPrompt({requestId, brief, source:parent.snapshot, variant, plan:this.assignedPlans.get(variant.requestId)}), DEFAULT_SETTINGS, 'submit_variant_review', undefined, 90_000);
+      const result = await this.runner.run(buildVariantReviewPrompt({requestId, brief, source, variant, plan:this.assignedPlans.get(variant.requestId)}), DEFAULT_SETTINGS, 'submit_variant_review', undefined, 90_000);
       const review = this.reviewVerdicts.get(requestId);
       this.deps.store.finishRequest(requestId, result.ok && review ? 'done' : 'failed', result.error);
       return result.ok && review ? review : fail(`見直しを完了できませんでした: ${result.error ?? '結果が届きませんでした'}。この案の生成を終了してください`);
@@ -356,16 +432,117 @@ export class Controller {
       // Plan against the page as it is now, so edits made by others since the request are kept.
       const page = await this.deps.slides.page(presentationId, pageId);
       const present = new Set((page.pageElements ?? []).map(e => e.objectId));
+      // Variant sources take precedence over later selections: an old proposal keeps its image.
+      const available=new Map([...this.deps.store.getAssetPool(presentationId).assets,...(variant.assets ?? [])].map(a=>[a.id,a]));
+      const used=new Set(input.frames.flat().filter(e=>e.type==='asset').map(e=>e.assetId!));
+      const poolUrls:Record<string,string>={};
+      const hosted:Array<{id:string;dataUrl:string}>=[];
+      const libraryUsed:PoolAsset[]=[];
+      for(const assetId of used) {
+        const saved=available.get(assetId);
+        if(!saved) { if(assetId.startsWith('pool_') || assetId.startsWith('lib_')) throw new Error('この案の素材が見つかりません。素材を選んで案を作り直してください'); continue; }
+        if(saved.source.kind==='library') {
+          // The image saved with the variant is what was reviewed; it is only checked that the item may still be used.
+          const lib=saved.source.library!;
+          const item=this.deps.library?.find(lib.key);
+          if(!item || item.license.status!=='confirmed') throw new Error(`共通素材が削除されたか、利用条件が未確認に戻っています：${lib.title}`);
+          // One image per color the icon is drawn in; the saved PNG is the default dark line.
+          const palette=this.palette(presentationId);
+          for(const color of new Set(input.frames.flat().filter(e=>e.assetId===assetId).map(e=>e.color))) {
+            const dataUrl=color && saved.svg && this.deps.library ? await this.deps.library.recolor(saved.svg,colorHex(palette,color,'#3c4043')) : saved.previewUrl;
+            hosted.push({id:imageKey(assetId,color),dataUrl});
+          }
+          libraryUsed.push(saved);present.add(assetId);continue;
+        }
+        const current=await resolvePoolAsset(this.deps.slides,presentationId,{id:saved.id,pageId:saved.source.pageId,objectId:saved.source.objectId,kind:saved.source.kind as 'page'|'image'|'chart',description:saved.description});
+        if(current.asset.source.fingerprint!==saved.source.fingerprint) throw new Error(`素材元が変更されています：${saved.description}。素材を読み込み直して案を作り直してください`);
+        poolUrls[assetId]=current.imageUrl;present.add(assetId);
+      }
       const missing = new Set(input.frames.flat().filter(e => e.type === 'asset' && !present.has(e.assetId ?? '')).map(e => e.assetId));
-      const plan = planSequence({page, size: info.size, frames: input.frames, idPrefix: `slp_${randomBytes(4).toString('hex')}`});
-      await this.deps.slides.batchUpdate(presentationId, plan.requests);
+      // Assets removed from the original page since the request are left out, as before.
+      const problems=validateVariant({requestId:variant.requestId,technique:variant.technique ?? 'takahashi',aim:input.aim,gaveUp:variant.gaveUp,frames:input.frames.map(elements=>({elements}))},{assetIds:[...present,...missing].filter((x):x is string=>!!x),palette:this.palette(presentationId)});
+      if(problems.length) throw new Error(problems.join(' / '));
+      if(hosted.length && !this.deps.auth.hasAllScopes()) throw new Error('共通素材を追加するには Drive の権限が必要です。「Google に接続し直す」を押してください');
+      const frames = input.frames.map((elements, i) => withNearCredits(elements, libraryUsed, i));
+      const idPrefix = `slp_${randomBytes(4).toString('hex')}`;
+      const write = async (urls: string[]) => {
+        hosted.forEach((h, i) => { poolUrls[h.id] = urls[i]!; });
+        const plan = planSequence({page, size: info.size, frames, idPrefix, poolImages: poolUrls});
+        await this.deps.slides.batchUpdate(presentationId, plan.requests);
+        return plan;
+      };
+      const plan = hosted.length
+        ? await this.deps.drive.withPublicImages(hosted.map(h => ({dataUrl: h.dataUrl, name: `slipper-${h.id.replace('|', '-')}.png`})), write)
+        : await write([]);
       this.deps.store.addAdoption({variantId: variant.id, finalFrames: input.frames, aimFinal: input.aim, counts: input.counts, insertedPageIds: plan.newPageIds});
+      const notes: string[] = [];
+      const credits = libraryUsed.flatMap(a => a.source.library?.credit ? [`${a.source.library.title}：${a.source.library.credit}`] : []);
+      if (credits.length) {
+        try {
+          const hasPage = (await this.deps.slides.structure(presentationId)).slides.some(sl => sl.id === CREDITS_PAGE);
+          const existing = hasPage ? creditsText(await this.deps.slides.page(presentationId, CREDITS_PAGE)) : null;
+          if (hasPage && existing === null) notes.push('資料末尾のクレジットページの本文が見つからないため、クレジットを追記できませんでした。手で追記してください');
+          else { const req = creditPageRequests({existing, lines: credits, size: info.size}); if (req.length) await this.deps.slides.batchUpdate(presentationId, req); notes.push('資料末尾のクレジットページに出典を追記しました'); }
+        } catch (e) { notes.push(`クレジットページを更新できませんでした（${(e as Error).message}）。出典を手で追記してください：${credits.join(' ／ ')}`); }
+      }
+      for (const a of libraryUsed) if (a.source.library?.limitNote) notes.push(`「${a.source.library.title}」の利用条件：${a.source.library.limitNote}`);
       // The editor is not moved automatically, so the panel stays on the original page and its variants.
       const where = input.frames.length > 1 ? `元のページの直後に ${input.frames.length} 枚続けて追加しました` : '元のページの直後に追加しました';
-      return {ok: true, newPageId: plan.newPageIds[0], message: missing.size ? `${where}。元のページから消えていた素材 ${missing.size} 件は含めていません` : where};
+      return {ok: true, newPageId: plan.newPageIds[0], message: [missing.size ? `${where}。元のページから消えていた素材 ${missing.size} 件は含めていません` : where, ...notes].join('。')};
     } catch (e) {
       return {ok: false, message: `追加できませんでした: ${(e as Error).message}`};
     }
+  }
+
+  // --- Asset library -------------------------------------------------------------------------
+
+  // MCP: find app-wide assets for a request. Found items become usable assetIds of that request.
+  async searchLibrary(input: {requestId: string; query: string; kind?: LibraryItem['kind']}) {
+    const library = this.deps.library;
+    if (!library) throw new Error('素材ライブラリを使えません');
+    const request = this.deps.store.getRequest(input.requestId);
+    if (!request || request.status !== 'pending') throw new Error('この依頼はもう締め切られています');
+    const found = library.search(input.query, {kind: input.kind, limit: 8});
+    const offers = this.offers.get(input.requestId) ?? new Map<string, PoolAsset>();
+    this.offers.set(input.requestId, offers);
+    const assets = await Promise.all(found.map(item => library.asPoolAsset(item)));
+    for (const a of assets) {
+      offers.set(a.id, a);
+      const context = this.previewContexts.get(input.requestId);
+      if (context && !context.assets.some(x => x.id === a.id)) context.assets.push(a);
+    }
+    return assets;
+  }
+
+  // One line for prompts: what kinds of app-wide assets exist, so plans are not limited to text.
+  private librarySummary(): string | undefined {
+    const state = this.deps.library?.state();
+    if (!state) return undefined;
+    const confirmed = state.imported.filter(i => i.license.status === 'confirmed').length;
+    return [...state.bundled.map(b => `${b.name} ${b.count}点`), ...(confirmed ? [`利用者が取り込んだ画像 ${confirmed}点`] : [])].join('、') + '。人物イラストは上半身・立つ・座るの身ぶりと表情（困る・指し示す・腕を組む・驚く など）がある';
+  }
+
+  private refreshLibrary() { if (this.deps.library) this.update({library: this.deps.library.state()}); }
+
+  importLibraryFiles(paths: string[]): Result {
+    if (!this.deps.library) return {ok: false, message: '素材ライブラリを使えません'};
+    const errors: string[] = [];
+    for (const p of paths) { try { this.deps.library.importFile(p); } catch (e) { errors.push(`${p.split('/').pop()}: ${(e as Error).message}`); } }
+    this.refreshLibrary();
+    const added = paths.length - errors.length;
+    return errors.length ? {ok: added > 0, message: [`${added}件を取り込みました`, ...errors].join('\n')} : {ok: true, message: `${added}件を取り込みました。出典と利用条件を記録すると、案に使えるようになります`};
+  }
+
+  updateLibraryItem(key: string, patch: LibraryPatch): Result {
+    const problems = this.deps.library?.update(key, patch) ?? ['素材ライブラリを使えません'];
+    this.refreshLibrary();
+    return problems.length ? {ok: false, message: problems.join('\n')} : {ok: true, message: '保存しました'};
+  }
+
+  removeLibraryItem(key: string): Result {
+    this.deps.library?.remove(key);
+    this.refreshLibrary();
+    return {ok: true, message: '削除しました'};
   }
 
   // --- Storylines: alternative flows for the whole deck -------------------------------------
@@ -501,7 +678,7 @@ export class Controller {
       const m = data && /^data:([^;]+);base64,(.*)$/.exec(data);
       if (m) out.push({label: deck ? `${i + 1}枚目（pageId: ${pageId}）` : `このページ（pageId: ${pageId}）`, mimeType: m[1]!, base64: m[2]!});
     }
-    return out;
+    return [...out,...(!deck ? poolImages(request.snapshot.assets ?? []) : [])];
   }
 
   // --- Readings of the current deck and page -------------------------------------------------

@@ -1,0 +1,16 @@
+import {build} from 'esbuild';
+import {spawn} from 'node:child_process';
+import {createRequire} from 'node:module';
+import {mkdirSync, writeFileSync} from 'node:fs';
+const require = createRequire(import.meta.url);
+const dir = 'node_modules/.cache/slipper-live-edit';
+mkdirSync(dir, {recursive: true});
+const common = {bundle: true, alias: {'@shared': './src/shared'}, jsx: 'automatic'};
+await build({...common, entryPoints: ['scripts/evaluate-live-edit.ts'], outfile: `${dir}/main.cjs`, platform: 'node', format: 'cjs', external: ['electron']});
+await build({...common, entryPoints: ['scripts/live-edit-fixture.tsx'], outfile: `${dir}/renderer.js`, platform: 'browser', format: 'iife'});
+await build({...common, entryPoints: ['src/preload/index.ts'], outfile: `${dir}/preload.cjs`, platform: 'node', format: 'cjs', external: ['electron']});
+writeFileSync(`${dir}/package.json`, JSON.stringify({name: 'slipper', version: '0.1.0', main: 'main.cjs'}));
+writeFileSync(`${dir}/index.html`, '<!doctype html><html lang="ja"><meta charset="utf-8"><link rel="stylesheet" href="renderer.css"><div id="root"></div><script src="renderer.js"></script></html>');
+const child = spawn(require('electron'), [dir], {stdio: 'inherit', env: process.env});
+child.on('error', e => { console.error(e); process.exitCode = 1; });
+child.on('exit', code => { process.exitCode = code ?? 1; });

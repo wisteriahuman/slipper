@@ -9,6 +9,9 @@ import {SlidePreview} from './SlidePreview';
 import {VariantCard} from './VariantCard';
 import {StoryboardCard} from './StoryboardCard';
 import {DeckReadingCard} from './DeckReadingCard';
+import {AssetPool} from './AssetPool';
+import {LibraryPanel} from './LibraryPanel';
+import {LiveEditor} from './LiveEditor';
 import {scenesFor} from '@shared/scenes';
 
 // Panel 560px − panel padding 22×2 − card padding 12×2 − borders 2 = 490px available inside a card.
@@ -18,7 +21,7 @@ export function App() {
   const [state, setState] = useState<PanelState | null>(null);
   const [editing, setEditing] = useState<Variant | null>(null);
   const [briefOpen, setBriefOpen] = useState(false);
-  const [mode, setMode] = useState<'page' | 'flow'>('page');
+  const [mode, setMode] = useState<'edit' | 'page' | 'flow' | 'library'>('edit');
 
   useEffect(() => {
     void window.slipper.getState().then(setState);
@@ -48,7 +51,7 @@ export function App() {
           <button onClick={() => void window.slipper.connectGoogle()}>Google に接続し直す</button></div>
       )}
 
-      {ready && deck && (!deck.brief || briefOpen
+      {ready && deck && (mode === 'page' || mode === 'flow' || briefOpen) && (!deck.brief || briefOpen
         ? <BriefForm deck={deck} onDone={() => setBriefOpen(false)} />
         : <section className="brief-summary">
             {deck.brief.context && <div><span className="label">場面</span>{deck.brief.context}</div>}
@@ -66,12 +69,16 @@ export function App() {
 
       {state.pageError && <div className="error">{state.pageError}</div>}
 
-      {ready && deck?.brief && !editing && (
+      {ready && deck && !editing && (
         <div className="tabs" role="tablist">
-          <button role="tab" aria-selected={mode === 'page'} className={mode === 'page' ? 'on' : ''} onClick={() => setMode('page')}>このページ</button>
+          <button role="tab" aria-selected={mode === 'edit'} className={mode === 'edit' ? 'on' : ''} onClick={() => setMode('edit')}>編集する</button>
+          <button role="tab" aria-selected={mode === 'page'} className={mode === 'page' ? 'on' : ''} onClick={() => setMode('page')}>別案を探す</button>
           <button role="tab" aria-selected={mode === 'flow'} className={mode === 'flow' ? 'on' : ''} onClick={() => setMode('flow')}>資料全体の流れ</button>
+          <button role="tab" aria-selected={mode === 'library'} className={mode === 'library' ? 'on' : ''} onClick={() => setMode('library')}>素材ライブラリ</button>
         </div>
       )}
+
+      {ready && deck && page && mode === 'edit' && !editing && <LiveEditor key={`${deck.presentationId}/${page.pageId}`} presentationId={deck.presentationId} pageId={page.pageId} />}
 
       {ready && deck?.brief && mode === 'flow' && !editing && (
         <>
@@ -87,6 +94,8 @@ export function App() {
         </>
       )}
 
+      {ready && deck && mode === 'library' && !editing && <LibraryPanel library={state.library} />}
+
       {ready && deck?.brief && page && mode === 'page' && !editing && (
         <>
           <RequestBar kind="page" running={state.running} onAsk={input => window.slipper.requestVariants(input)} />
@@ -100,16 +109,17 @@ export function App() {
                   <p className="aim">{page.reading.aim}</p>
                   <p className="gave-up"><span className="label">捨てているもの</span>{page.reading.gaveUp}</p></div>
               : <p className="muted small">「別の伝え方を見る」を押すと、今のページの狙いも一緒に読み解きます。</p>}
+            <AssetPool pool={state.assetPool} busy={!!state.running} />
           </section>
           <section>
             <h2>別の伝え方 {state.variants.length > 0 && <span className="count">{state.variants.length}案</span>}</h2>
             {state.variants.length === 0 && !state.running && <p className="muted">まだ案はありません。上のボタンで頼んでみてください。</p>}
-            {state.variants.map(v => <VariantCard key={v.id} variant={v} palette={deck.palette} assets={page.assets} decorations={page.decorations} pageImage={page.thumbnailUrl} textBoxes={page.textBoxes} onEdit={() => setEditing(v)} />)}
+            {state.variants.map(v => <VariantCard key={v.id} variant={v} palette={deck.palette} assets={[...page.assets, ...(v.assets ?? [])]} decorations={page.decorations} pageImage={page.thumbnailUrl} textBoxes={page.textBoxes} onEdit={() => setEditing(v)} />)}
           </section>
         </>
       )}
 
-      {editing && deck && page && <Editor variant={editing} palette={deck.palette} assets={page.assets} decorations={page.decorations} pageImage={page.thumbnailUrl} textBoxes={page.textBoxes} onClose={() => setEditing(null)} />}
+      {editing && deck && page && <Editor variant={editing} palette={deck.palette} assets={[...page.assets, ...(editing.assets ?? [])]} decorations={page.decorations} pageImage={page.thumbnailUrl} textBoxes={page.textBoxes} onClose={() => setEditing(null)} />}
 
       {state.mcp && ready && (
         <details className="mcp">

@@ -1,6 +1,7 @@
 // Pure conversions between the Google Slides API shapes and Slipper's elements.
 // Kept free of network code so they can be tested with fixtures.
 import type {SlideElement} from '@shared/element';
+import {SLIDE_LINE_WIDTH} from '@shared/slide-style';
 import {EMU_PER_PT, fromEmu, toEmu, type PageSize} from '@shared/geometry';
 import type {Palette} from '@shared/palette';
 import {NOTE_PREFIX} from './storyline-build';
@@ -16,14 +17,14 @@ export type ApiPageElement = {
   size?: {width?: Dimension; height?: Dimension}; transform?: Transform;
   shape?: {shapeType?: string; placeholder?: {type?: string}; text?: {textElements?: TextElement[]}; shapeProperties?: {shapeBackgroundFill?: SolidFill}};
   image?: {contentUrl?: string}; table?: {tableRows?: Array<{tableCells?: Array<{text?: {textElements?: TextElement[]}}>}>};
-  sheetsChart?: unknown; video?: unknown; line?: {lineCategory?: string; lineType?: string; lineProperties?: {lineFill?: SolidFill; weight?: Dimension}};
+  sheetsChart?: {contentUrl?: string}; video?: unknown; line?: {lineCategory?: string; lineType?: string; lineProperties?: {lineFill?: SolidFill; weight?: Dimension}};
   elementGroup?: {children?: ApiPageElement[]}; wordArt?: unknown;
 };
 export type ApiPage = {objectId: string; pageElements?: ApiPageElement[]; pageProperties?: {colorScheme?: ApiColorScheme}};
 export type ApiColorScheme = {colors?: Array<{type?: string; color?: {red?: number; green?: number; blue?: number}}>};
 
 export type PageText = {id: string; text: string; x: number; y: number; w: number; h: number; size: number | null; bold: boolean};
-export type PageAsset = {id: string; kind: 'image' | 'table' | 'chart' | 'video' | 'group' | 'shape' | 'line' | 'other'; description: string; x: number; y: number; w: number; h: number; contentUrl?: string};
+export type PageAsset = {id: string; kind: 'page' | 'image' | 'icon' | 'illustration' | 'photo' | 'table' | 'chart' | 'video' | 'group' | 'shape' | 'line' | 'other'; description: string; x: number; y: number; w: number; h: number; contentUrl?: string; previewUrl?: string; svg?: string; source?: import('@shared/asset-pool').AssetSource};
 export type PageContent = {pageId: string; texts: PageText[]; assets: PageAsset[]};
 
 const emu = (d: Dimension | undefined) => (d?.magnitude ?? 0) * (d?.unit === 'PT' ? EMU_PER_PT : 1);
@@ -48,7 +49,7 @@ const multiply = (p: Matrix, c: Matrix): Matrix => ({
 });
 
 // Axis-aligned bounding box on the canvas; a rotated element becomes the box around it.
-function box(el: ApiPageElement, page: PageSize, parent: Matrix = IDENTITY) {
+export function box(el: ApiPageElement, page: PageSize, parent: Matrix = IDENTITY) {
   const m = multiply(parent, toMatrix(el.transform));
   const w = emu(el.size?.width), h = emu(el.size?.height);
   const xs = [0, w].flatMap(x => [0, h].map(y => m.a * x + m.b * y + m.tx));
@@ -137,12 +138,14 @@ export function toPalette(scheme: ApiColorScheme | undefined, meanings: Palette[
 
 const SHAPE_TYPE = {rect: 'RECTANGLE', roundRect: 'ROUND_RECTANGLE', ellipse: 'ELLIPSE'} as const;
 
+export const imageKey = (assetId: string, color: string | undefined) => `${assetId}|${color ?? ''}`;
+
 export type WriteBackPlan = {newPageId: string; requests: object[]};
 
 // Builds a batchUpdate that duplicates the original page right after itself, keeps the assets the
 // variant uses (moved/resized), removes everything else from the copy, and draws the new text and shapes.
 // The original page is never modified.
-export function planWriteBack(opts: {page: ApiPage; size: PageSize; elements: SlideElement[]; idPrefix: string}): WriteBackPlan {
+export function planWriteBack(opts: {page: ApiPage; size: PageSize; elements: SlideElement[]; idPrefix: string; poolImages?: Record<string,string>}): WriteBackPlan {
   const {page, size, elements, idPrefix} = opts;
   const newPageId = `${idPrefix}_page`;
   const children = page.pageElements ?? [];
@@ -169,6 +172,15 @@ export function planWriteBack(opts: {page: ApiPage; size: PageSize; elements: Sl
   const stacking: string[] = [];
   elements.forEach((e, i) => {
     if (e.type === 'asset') {
+      // Recolored icons are keyed by asset and color; other images by asset alone.
+      const imageUrl = e.assetId && (opts.poolImages?.[imageKey(e.assetId, e.color)] ?? opts.poolImages?.[e.assetId]);
+      if(imageUrl) {
+        const objectId=`${idPrefix}_a${i}`;
+        requests.push({createImage:{objectId,url:imageUrl,elementProperties:{pageObjectId:newPageId,
+          size:{width:{magnitude:toEmu(e.w,size),unit:'EMU'},height:{magnitude:toEmu(e.h,size),unit:'EMU'}},
+          transform:{scaleX:1,scaleY:1,translateX:toEmu(e.x,size),translateY:toEmu(e.y,size),unit:'EMU'}}}});
+        stacking.push(objectId);return;
+      }
       const copy = e.assetId && assetPlacement.get(e.assetId) === e ? copyId.get(e.assetId) : undefined;
       if (copy) stacking.push(copy);
       return;
@@ -179,7 +191,10 @@ export function planWriteBack(opts: {page: ApiPage; size: PageSize; elements: Sl
       transform: {scaleX: 1, scaleY: 1, translateX: toEmu(e.x, size), translateY: toEmu(e.y, size), unit: 'EMU'}};
     if (e.type === 'shape' && e.shape === 'line') {
       requests.push({createLine: {objectId, lineCategory: 'STRAIGHT', elementProperties}});
-      if (e.fill) requests.push({updateLineProperties: {objectId, lineProperties: {lineFill: {solidFill: {color: {themeColor: e.fill}}}}, fields: 'lineFill'}});
+      requests.push({updateLineProperties: {objectId, lineProperties: {
+        lineFill: {solidFill: {color: {themeColor: e.fill ?? 'DARK2'}}},
+        weight: {magnitude: toEmu(SLIDE_LINE_WIDTH, size) / EMU_PER_PT, unit: 'PT'}
+      }, fields: 'lineFill,weight'}});
       return;
     }
     const shapeType = e.type === 'text' ? 'TEXT_BOX' : SHAPE_TYPE[e.shape as keyof typeof SHAPE_TYPE] ?? 'RECTANGLE';
@@ -207,8 +222,8 @@ export function planWriteBack(opts: {page: ApiPage; size: PageSize; elements: Sl
 // A sequence becomes consecutive pages right after the original. duplicateObject always inserts the
 // copy directly after the original, so the last slide is built first and each earlier one lands in
 // front of it: original, 1, 2, 3.
-export function planSequence(opts: {page: ApiPage; size: PageSize; frames: SlideElement[][]; idPrefix: string}): {newPageIds: string[]; requests: object[]} {
-  const plans = opts.frames.map((elements, i) => planWriteBack({page: opts.page, size: opts.size, elements, idPrefix: `${opts.idPrefix}f${i}`}));
+export function planSequence(opts: {page: ApiPage; size: PageSize; frames: SlideElement[][]; idPrefix: string; poolImages?: Record<string,string>}): {newPageIds: string[]; requests: object[]} {
+  const plans = opts.frames.map((elements, i) => planWriteBack({page: opts.page, size: opts.size, elements, idPrefix: `${opts.idPrefix}f${i}`,poolImages:opts.poolImages}));
   return {newPageIds: plans.map(p => p.newPageId), requests: [...plans].reverse().flatMap(p => p.requests)};
 }
 

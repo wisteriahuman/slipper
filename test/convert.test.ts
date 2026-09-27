@@ -146,3 +146,32 @@ describe('asset transforms during zoom', () => {
     expect(plan.requests).toContainEqual({updatePageElementTransform:{objectId:'x_c0',applyMode:'ABSOLUTE',transform:{scaleX:0,scaleY:0,shearX:-2,shearY:2,translateX:400,translateY:200,unit:'EMU'}}});
   });
 });
+
+describe('assets from elsewhere in the deck', () => {
+  const elements: SlideElement[] = [
+    {id: 't', type: 'text', text: '先月の画面', x: 64, y: 32, w: 400, h: 50, size: 32, invented: false},
+    {id: 'shot', type: 'asset', assetId: 'pool_abc', x: 100, y: 120, w: 480, h: 270, invented: false}
+  ];
+  const {requests} = planWriteBack({page, size, elements, idPrefix: 'slp_p', poolImages: {pool_abc: 'https://example.com/shot.png'}});
+  it('inserts the selected image at the variant position on the new page', () => {
+    expect(requests).toContainEqual({createImage: {objectId: 'slp_p_a1', url: 'https://example.com/shot.png', elementProperties: {pageObjectId: 'slp_p_page',
+      size: {width: {magnitude: Math.round(480 * scale), unit: 'EMU'}, height: {magnitude: Math.round(270 * scale), unit: 'EMU'}},
+      transform: {scaleX: 1, scaleY: 1, translateX: Math.round(100 * scale), translateY: Math.round(120 * scale), unit: 'EMU'}}}});
+  });
+  it('stacks it in the variant order and still removes unused originals', () => {
+    const order = requests.filter(r => 'updatePageElementsZOrder' in r).map(r => (r as {updatePageElementsZOrder: {pageElementObjectIds: string[]}}).updatePageElementsZOrder.pageElementObjectIds[0]);
+    expect(order).toEqual(['slp_p_n0', 'slp_p_a1']);
+    expect(requests).toContainEqual({deleteObject: {objectId: 'slp_p_c2'}});
+  });
+});
+
+describe('recolored icons', () => {
+  it('uses the image for the element color, falling back to the default image', () => {
+    const icon = (id: string, color?: string): SlideElement => ({id, type: 'asset', assetId: 'lib_x', x: 10, y: 10, w: 96, h: 96, invented: false, ...(color ? {color} : {})});
+    const urls = {'lib_x|LIGHT1': 'https://example.com/light.png', 'lib_x|': 'https://example.com/dark.png'};
+    const light = planWriteBack({page, size, elements: [icon('a', 'LIGHT1')], idPrefix: 'p1', poolImages: urls}).requests;
+    const dark = planWriteBack({page, size, elements: [icon('a')], idPrefix: 'p2', poolImages: urls}).requests;
+    expect(JSON.stringify(light)).toContain('light.png');
+    expect(JSON.stringify(dark)).toContain('dark.png');
+  });
+});

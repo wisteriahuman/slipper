@@ -1,6 +1,8 @@
 // Local records: the brief and color meanings per presentation, requests, variants and adoptions.
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
+import type {PoolItem, PoolAsset} from '@shared/asset-pool';
+import type {LibraryItem} from '@shared/library';
 import type {SlideElement, Variant, VariantInput} from '@shared/element';
 import type {ColorMeaning} from '@shared/palette';
 import type {PageContent} from './google/convert';
@@ -25,6 +27,8 @@ export class Store {
     this.db.exec(`
       pragma journal_mode = wal;
       pragma foreign_keys = on;
+      create table if not exists library_items (key text primary key, file text not null, mime text not null, data text not null, added_at integer not null);
+      create table if not exists asset_pools (presentation_id text primary key, items text not null, assets text not null);
       create table if not exists presentations (id text primary key, title text not null default '', audience text not null, message text not null, created_at integer not null, updated_at integer not null);
       create table if not exists color_meanings (id text primary key, presentation_id text not null references presentations(id), color_ref text not null, meaning text not null, updated_at integer not null, unique (presentation_id, color_ref));
       create table if not exists requests (id text primary key, presentation_id text not null references presentations(id), page_id text not null, source text not null, direction text, approach text, model text, effort text, status text not null, error text, page_snapshot text not null, started_at integer not null, finished_at integer);
@@ -56,6 +60,26 @@ export class Store {
     const row = this.db.prepare('select audience, message, context, subject from presentations where id = ?').get(presentationId) as Required<Brief> | undefined;
     return row ? {audience: row.audience, message: row.message, ...(row.context ? {context: row.context} : {}), ...(row.subject ? {subject: row.subject} : {})} : null;
   }
+
+  getAssetPool(presentationId:string): {items:PoolItem[];assets:PoolAsset[]} {
+    const row=this.db.prepare('select items, assets from asset_pools where presentation_id = ?').get(presentationId) as {items:string;assets:string}|undefined;
+    return row ? {items:JSON.parse(row.items),assets:JSON.parse(row.assets)} : {items:[],assets:[]};
+  }
+  saveAssetPool(presentationId:string,items:PoolItem[],assets:PoolAsset[]) {
+    this.db.prepare('insert into asset_pools (presentation_id,items,assets) values (?,?,?) on conflict(presentation_id) do update set items=excluded.items,assets=excluded.assets')
+      .run(presentationId,JSON.stringify(items),JSON.stringify(assets));
+  }
+
+  // Imported library items. file is relative to the library directory.
+  libraryItems(): Array<LibraryItem & {file: string; mime: string; addedAt: number}> {
+    const rows = this.db.prepare('select file, mime, data, added_at as addedAt from library_items order by added_at desc').all() as Array<{file: string; mime: string; data: string; addedAt: number}>;
+    return rows.map(r => ({...JSON.parse(r.data) as LibraryItem, file: r.file, mime: r.mime, addedAt: r.addedAt}));
+  }
+  saveLibraryItem(item: LibraryItem, file: string, mime: string) {
+    this.db.prepare('insert into library_items (key, file, mime, data, added_at) values (?, ?, ?, ?, ?) on conflict(key) do update set data = excluded.data')
+      .run(item.key, file, mime, JSON.stringify(item), Date.now());
+  }
+  removeLibraryItem(key: string) { this.db.prepare('delete from library_items where key = ?').run(key); }
 
   saveBrief(presentationId: string, title: string, brief: Brief) {
     const now = Date.now();
@@ -97,7 +121,7 @@ export class Store {
   }
 
   // elements keeps the first slide for rows written before variants became sequences.
-  addVariant(v: VariantInput, review: Pick<Variant, 'plan' | 'visualReview' | 'independentReview'> = {}): Variant {
+  addVariant(v: VariantInput, review: Pick<Variant, 'plan' | 'visualReview' | 'independentReview' | 'assets'> = {}): Variant {
     const id = randomUUID(), receivedAt = Date.now();
     this.db.prepare('insert into variants (id, request_id, aim, gave_up, elements, frames, device, supporting, review, received_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(id, v.requestId, v.aim, v.gaveUp, JSON.stringify(v.frames[0]!.elements), JSON.stringify(v.frames), v.technique, JSON.stringify(v.supportingTechniques ?? []), JSON.stringify(review), receivedAt);
@@ -110,7 +134,7 @@ export class Store {
     const rows = this.db.prepare(`select v.id, v.request_id as requestId, v.aim, v.gave_up as gaveUp, v.elements, v.frames, v.device, v.supporting, v.review, v.received_at as receivedAt, r.approach
       from variants v join requests r on r.id = v.request_id where r.presentation_id = ? and r.page_id = ? order by v.received_at desc, v.rowid desc`).all(presentationId, pageId) as unknown as Row[];
     // The device column holds the technique id.
-    return rows.map(({elements, frames, device, supporting, review, ...r}) => ({...r, ...(review ? JSON.parse(review) as Pick<Variant, 'plan' | 'visualReview' | 'independentReview'> : {}), ...(supporting ? {supportingTechniques: JSON.parse(supporting) as string[]} : {}), ...(device ? {technique: device} : {}),
+    return rows.map(({elements, frames, device, supporting, review, ...r}) => ({...r, ...(review ? JSON.parse(review) as Pick<Variant, 'plan' | 'visualReview' | 'independentReview' | 'assets'> : {}), ...(supporting ? {supportingTechniques: JSON.parse(supporting) as string[]} : {}), ...(device ? {technique: device} : {}),
       frames: frames ? JSON.parse(frames) as Variant['frames'] : [{elements: JSON.parse(elements) as SlideElement[]}]}));
   }
 
